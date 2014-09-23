@@ -74,9 +74,8 @@ echo "set\n";
 // configuration
 $leftturn = true;	// circle into which direction?
 $triggerdeg = 7;	// how many degrees to trigger on heading?
-
-$normalpitch = 5;	// normal pitch (nose up) degrees
 $bankangle = 45;	// normal bank angle while circling
+$normspeed = 60;	// speed in knots	
 
 // decides how strong the correction has to be (if any) and
 // returns an array with all parameters needed for the correction
@@ -87,11 +86,9 @@ function getCorrectionParameters($angle, $length) {
 		// gets down length from 0.2 to 0.6
 		$ret['heading_offset'] = 30;	// how many degrees before/after 90 deg should the correction start/end?
 		$ret['bank'] = 15;				// bank angle while correcting
-		$ret['pitch'] = 0;				// pitch while correcting
 	} elseif ($length < 0.6) {
 		$ret['heading_offset'] = 30;
 		$ret['bank'] = 20;
-		$ret['pitch'] = 0;
 	} elseif ($length < 0.1) {
 		$ret['correction_needed'] = false;
 	}
@@ -101,8 +98,6 @@ function getCorrectionParameters($angle, $length) {
 	return $ret;
 }
 
-
-
 // some initialisations
 $subscribed = false;
 $startcorrectionat = 0;
@@ -110,10 +105,19 @@ $endcorrectionat = 0;
 $correcthead = 0;
 $correctbank = 0;
 $correctpitch = 0;
+
 $turnrateint = 0;
 $pitchint = 0;
+$speedint = 0;
+$beforeturn = microtime(true);
+$beforespeed = microtime(true);
+$beforepitch = microtime(true);
+$lastturnerror = 0;
+$lastpitcherror = 0;
+$lastspeederror = 0;
 
-$setpitch = $normalpitch;
+$pitchtoset = -2;
+
 $rolldeg = getBankAngle($leftturn, $bankangle);
 
 do {
@@ -181,7 +185,6 @@ do {
 						$endcorrectionat = $correctionparams['end_at'];
 						$correcthead = $correctionparams['heading_offset'];
 						$correctbank = $correctionparams['bank'];
-						$correctpitch = $correctionparams['pitch'];
 						echo "correction:\n";
 						echo "start correction at: $startcorrectionat\n";
 						echo "end correction at: $endcorrectionat\n";
@@ -201,25 +204,38 @@ do {
 			if ($needscorrection && !$correctionstarted && abs($heading - $startcorrectionat)+$triggerdeg/2 < $triggerdeg) {
 				// start correction
 				$rolldeg = getBankAngle($leftturn, $correctbank);
-				$setpitch = $correctpitch;
 				$correctionstarted = true;
 			}
 			if ($needscorrection && $correctionstarted && abs($heading - $endcorrectionat)+$triggerdeg/2 < $triggerdeg) {
 				// end correction
 				$rolldeg = getBankAngle($leftturn, $bankangle);
-				$setpitch = $normalpitch;
 			}
 			
 			break;
-		
+			
 		// control roll rate
 		case 'sim/cockpit2/gauges/indicators/roll_AHARS_deg_pilot':
 			$turnrate = trim($arr[2]);
 			//echo 'turnrate: '.$turnrate."\n";
-			$e = $rolldeg - $turnrate;
-			$turnrateint += $e;
+			$r = 30; // degrees
+			
+			$nowturn = microtime(true);
+			$dt = ($nowturn - $beforeturn);
+			
+			$turne = $rolldeg - $turnrate;
+			$turnrateint += $dt*$turne;
+			$turndiff = ($turne - $lastturnerror)/$dt;
 			//echo "turnrateint: $turnrateint\n";
-			$y = 0.05*$e + 0.001*$turnrateint;
+			
+			$kp = 0.05;
+			$ki = 0.001;
+			$kd = 0.001;
+			
+			$y = $kp * $turne + $ki * $turnrateint + $kd * $turndiff;
+			//echo "y: $y, turne: $turne, turnrateint: $turnrateint, turndiff: $turndiff\n";
+			
+			$beforeturn = $nowturn;
+			$lastturnerror = $turne;
 			socket_write($sock, "set sim/flightmodel2/controls/aileron_trim $y\n");
 			break;
 		
@@ -227,23 +243,71 @@ do {
 		case 'sim/cockpit2/gauges/indicators/pitch_electric_deg_pilot':
 			$pitch = trim($arr[2]);
 			//echo "pitch: $pitch\n";
-			$r = $setpitch;
-			$e = $r - $pitch;
-			//echo "e: $e\n";
-			$pitchint += $e;
-			$y = 0.05*$e + 0.001*$pitchint;
+			$r = $pitchtoset;
+
+			$nowpitch = microtime(true);
+			$dt = ($nowpitch - $beforepitch);
+			
+			$pitche = $r - $pitch;
+			$pitchint += $dt * $pitche;
+			if ($pitchint > 30) {
+				$pitchint = 30;
+			} elseif ($pitchint < -30) {
+				$pitchint = -30;
+			}
+			$pitchdiff = ($pitche - $lastpitcherror)/$dt;
+				
+			$kp = 0.2;
+			$ki = 0.032;
+			$kd = 0.005;
+			
+			$y = $kp * $pitche + $ki * $pitchint + $kd * $pitchdiff;
+			//echo "elevator_trim: $y, pitch: $pitch, pitche: $pitche, pitchint: $pitchint, pitchdiff: $pitchdiff\n";
+
+			$beforepitch = $nowpitch;
+			$lastpitcherror = $pitche;
+			
 			socket_write($sock, "set sim/flightmodel2/controls/elevator_trim $y\n");
 			break;
+			
+		// control elevator via velocity
+		case 'sim/flightmodel/position/indicated_airspeed':
+			$nowspeed = microtime(true);
+			$dt = ($nowspeed - $beforespeed);
+			
+			$airspeed = trim($arr[2]);
+			//echo 'airspeed: '.$airspeed."\n";
+			$r = $normspeed; // knots
+			$speede = $r - $airspeed;
+			$speedint += $dt * $speede;
+			if ($speedint > 50) {
+				$speedint = 50;
+			} elseif ($speedint < -50) {
+				$speedint = -50;
+			}
+			$speeddiff = ($speede - $lastspeederror)/$dt;
+			//echo "speede: $speede, speedint: $speedint, speeddiff: $speeddiff\n";
+
+			$kp = -1;
+			$ki = -1;
+			$kd = -0.1;
+			
+			$pitchtoset = $kp * $speede + $ki * $speedint + $kd * $speeddiff;
+			//echo "updated pitchtoset to $pitchtoset\n";
+			
+			$beforespeed = $nowspeed;
+			$lastspeederror = $speede;
 	}
 	
 	if (!$subscribed) {
 		echo 'subscribing...';
-		socket_write($sock, "sub sim/cockpit2/gauges/indicators/total_energy_fpm\n");
-		socket_write($sock, "sub sim/cockpit2/gauges/indicators/roll_AHARS_deg_pilot\n");
+		socket_write($sock, "sub sim/cockpit2/gauges/indicators/total_energy_fpm\n");				// vario
+		socket_write($sock, "sub sim/flightmodel/position/indicated_airspeed\n");					// TAS
+		socket_write($sock, "sub sim/cockpit2/gauges/indicators/roll_AHARS_deg_pilot\n");			// roll attitude
+		socket_write($sock, "sub sim/cockpit2/gauges/indicators/pitch_electric_deg_pilot\n");		// pitch attitude
+		socket_write($sock, "sub sim/cockpit2/gauges/indicators/heading_electric_deg_mag_pilot\n");	// heading
 		socket_write($sock, "sub sim/flightmodel2/controls/elevator_trim\n");
 		socket_write($sock, "sub sim/flightmodel2/controls/aileron_trim\n");
-		socket_write($sock, "sub sim/cockpit2/gauges/indicators/pitch_electric_deg_pilot\n");
-		socket_write($sock, "sub sim/cockpit2/gauges/indicators/heading_electric_deg_mag_pilot\n");
 		echo "subscribed.\n";
 		$subscribed = true;
 	}
