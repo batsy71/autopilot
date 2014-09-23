@@ -6,7 +6,7 @@ include("../class/pDraw.class.php");
 include("../class/pRadar.class.php");
 include("../class/pImage.class.php");
 
-function doperiodic($val) {
+function doPeriodic($val) {
 	if ($val > 360) {
 		do {
 			$val -= 360;
@@ -20,7 +20,7 @@ function doperiodic($val) {
 	return $val;
 }
 
-function getbankangle($leftturn, $bank) {
+function getBankAngle($leftturn, $bank) {
 	if ($leftturn) {
 		return -$bank;
 	} else {
@@ -60,33 +60,61 @@ function plot($lift) {
 	$myPicture->autoOutput("lift.png");
 }
 
+// connecting to socket
 $sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP) or die("socket_create() failed: reason: " . socket_strerror(socket_last_error()) . "\n");
 echo 'connecting...';
 socket_connect($sock,'127.0.0.1','51000') or die("Could not connect to the socket\n");
 echo "connected.\n";
 
-$subscribed = false;
-
+// setting update interval
 echo "setting update interval of extplane to 60hz...";
 socket_write($sock, "update_interval 0.16\n");
 echo "set\n";
 
-echo "resetting elevator trim to 0...";
-socket_write($sock, "set sim/flightmodel2/controls/elevator_trim 0\n");
-echo "done\n";
+// configuration
+$leftturn = true;	// circle into which direction?
+$triggerdeg = 7;	// how many degrees to trigger on heading?
+
+$normalpitch = 5;	// normal pitch (nose up) degrees
+$bankangle = 45;	// normal bank angle while circling
+
+// decides how strong the correction has to be (if any) and
+// returns an array with all parameters needed for the correction
+function getCorrectionParameters($angle, $length) {
+	$ret['correction_needed'] = true;
+	if ($length >= 0.6) {
+		// undershoots for $length >= 0.7 (0.73 -> 0.5), overshoots for <= 0.5 (0.5 -> -0.13)
+		// gets down length from 0.2 to 0.6
+		$ret['heading_offset'] = 30;	// how many degrees before/after 90 deg should the correction start/end?
+		$ret['bank'] = 15;				// bank angle while correcting
+		$ret['pitch'] = 0;				// pitch while correcting
+	} elseif ($length < 0.6) {
+		$ret['heading_offset'] = 30;
+		$ret['bank'] = 20;
+		$ret['pitch'] = 0;
+	} elseif ($length < 0.1) {
+		$ret['correction_needed'] = false;
+	}
+	
+	$ret['start_at'] = round(doPeriodic($angle+90+$ret['heading_offset']));
+	$ret['end_at'] = round(doPeriodic($angle+90-$ret['heading_offset']));
+	return $ret;
+}
+
+
 
 // some initialisations
+$subscribed = false;
+$startcorrectionat = 0;
+$endcorrectionat = 0;
+$correcthead = 0;
+$correctbank = 0;
+$correctpitch = 0;
 $turnrateint = 0;
 $pitchint = 0;
 
-// configuration
-$leftturn = true;	// circle into which direction?
-$triggerdeg = 5;	// how many degrees to trigger on heading?
-$correcthead = 20;	// how many degrees before 90 deg should the correction start?
-$bankangle = 45;	// normal bank angle while circling
-$correctbank = 30;	// bank angle while correcting
-
-$rolldeg = getbankangle($leftturn, $bankangle);
+$setpitch = $normalpitch;
+$rolldeg = getBankAngle($leftturn, $bankangle);
 
 do {
 	$read=socket_read($sock,1024,PHP_NORMAL_READ);
@@ -111,78 +139,87 @@ do {
 				if (abs($heading - $firstheading) > $triggerdeg) {
 					if (!$gone) $gone = true;
 				}
-				if (abs($heading - $firstheading)+$triggerdeg/2 < $triggerdeg) {
-					if ($gone) {
-						echo "############\ncircle completed:\n";
-						// sum up lift as function of heading as vectors
-						$fpmsum = 0; $xsum=0; $ysum=0;
-						foreach ($lift as $heading => $fpm) {
-							$fpmsum += $fpm;
+				if ($gone && abs($heading - $firstheading)+$triggerdeg/2 < $triggerdeg) {
+					echo "############\ncircle completed:\n";
+					// sum up lift as function of heading as vectors
+					$fpmsum=0; $posfpmsum=0; $xsum=0; $ysum=0;
+					foreach ($lift as $heading => $fpm) {
+						$fpmsum += $fpm;
+						if ($fpm > 0) {
+							$posfpmsum += $fpm;
 							$x = $fpm * cos($heading/360*2*pi());
 							$y = $fpm * sin($heading/360*2*pi());
 							$xsum += $x;
 							$ysum += $y;
 						}
-						
-						// convert back to polar coordinates
-						$angle = atan($ysum/$xsum);
-						
-						// check into which quadrant the vector points
-						if		($ysum > 0 && $xsum < 0) $angle += pi();	// II
-						elseif	($ysum < 0 && $xsum < 0) $angle += pi();	// III
-						elseif	($ysum < 0 && $xsum > 0) $angle += 2*pi();	// IV
-						
-						// convert to degrees
-						$angle = round(doperiodic($angle/(2*pi())*360));
-						$length = round(sqrt(pow($xsum,2)+pow($ysum,2))/$fpmsum,2);
-						
-						echo "average lift in cirle: ".round($fpmsum/sizeof($lift))." fpm\n";
-						echo "best lift in circle: ".round(max($lift))." fpm at ".round(array_search(max($lift), $lift))." deg\n";
-						echo "worst lift in circle: ".round(min($lift))." fpm at ".round(array_search(min($lift), $lift))." deg\n";
-						echo "factor best lift/average lift: ".round(max($lift)/($fpmsum/sizeof($lift)))."\n";
-						echo "better lift in direction: ".$angle." deg, length $length\n";
-						
-						if ($length > 0.1) {
-							$needscorrection = true;
-							$startcorrectionat = round(doperiodic($angle+90+$correcthead));
-							$endcorrectionat = round(doperiodic($angle+90-$correcthead));
-							echo "correction:\n";
-							echo "start correction at: $startcorrectionat\n";
-							echo "end correction at: $endcorrectionat\n";
-						} else {
-							echo "no correction needed.\n";
-							$needscorrection = false;
-						}
-						echo "############\n";
-						
-						plot($lift);
-						
-						unset($lift);
-						$gone = false;
-						$correctionstarted = false;
 					}
+					
+					// convert back to polar coordinates
+					$angle = atan($ysum/$xsum);
+					
+					// check into which quadrant the vector points
+					if		($ysum > 0 && $xsum < 0) $angle += pi();	// II
+					elseif	($ysum < 0 && $xsum < 0) $angle += pi();	// III
+					elseif	($ysum < 0 && $xsum > 0) $angle += 2*pi();	// IV
+					
+					// convert to degrees
+					$angle = round(doPeriodic($angle/(2*pi())*360));
+					$length = round(sqrt(pow($xsum,2)+pow($ysum,2))/$posfpmsum,2);
+					
+					echo "average lift in cirle: ".round($fpmsum/sizeof($lift))." fpm\n";
+					echo "best lift in circle: ".round(max($lift))." fpm at ".round(array_search(max($lift), $lift))." deg\n";
+					echo "worst lift in circle: ".round(min($lift))." fpm at ".round(array_search(min($lift), $lift))." deg\n";
+					echo "factor best lift/average lift: ".round(max($lift)/($fpmsum/sizeof($lift)))."\n";
+					echo "better lift in direction: ".$angle." deg, length $length\n";
+					
+					// decide how the correction will look like
+					$correctionparams = getCorrectionParameters($angle, $length);
+					
+					if ($correctionparams['correction_needed']) {
+						$needscorrection = true;
+						$startcorrectionat = $correctionparams['start_at'];
+						$endcorrectionat = $correctionparams['end_at'];
+						$correcthead = $correctionparams['heading_offset'];
+						$correctbank = $correctionparams['bank'];
+						$correctpitch = $correctionparams['pitch'];
+						echo "correction:\n";
+						echo "start correction at: $startcorrectionat\n";
+						echo "end correction at: $endcorrectionat\n";
+					} else {
+						echo "no correction needed.\n";
+						$needscorrection = false;
+					}
+					echo "############\n";
+					
+					plot($lift);
+					
+					unset($lift);
+					$gone = false;
+					$correctionstarted = false;
 				}
 			}
 			if ($needscorrection && !$correctionstarted && abs($heading - $startcorrectionat)+$triggerdeg/2 < $triggerdeg) {
 				// start correction
-				$rolldeg = getbankangle($leftturn, $correctbank);
+				$rolldeg = getBankAngle($leftturn, $correctbank);
+				$setpitch = $correctpitch;
 				$correctionstarted = true;
 			}
 			if ($needscorrection && $correctionstarted && abs($heading - $endcorrectionat)+$triggerdeg/2 < $triggerdeg) {
 				// end correction
-				$rolldeg = getbankangle($leftturn, $bankangle);
+				$rolldeg = getBankAngle($leftturn, $bankangle);
+				$setpitch = $normalpitch;
 			}
 			
 			break;
 		
 		// control roll rate
-		case 'sim/cockpit2/gauges/indicators/turn_rate_roll_deg_pilot':
+		case 'sim/cockpit2/gauges/indicators/roll_AHARS_deg_pilot':
 			$turnrate = trim($arr[2]);
 			//echo 'turnrate: '.$turnrate."\n";
 			$e = $rolldeg - $turnrate;
 			$turnrateint += $e;
 			//echo "turnrateint: $turnrateint\n";
-			$y = 0.1*$e + 0.1*$turnrateint;
+			$y = 0.05*$e + 0.001*$turnrateint;
 			socket_write($sock, "set sim/flightmodel2/controls/aileron_trim $y\n");
 			break;
 		
@@ -190,12 +227,11 @@ do {
 		case 'sim/cockpit2/gauges/indicators/pitch_electric_deg_pilot':
 			$pitch = trim($arr[2]);
 			//echo "pitch: $pitch\n";
-			$r = -2.2;
+			$r = $setpitch;
 			$e = $r - $pitch;
 			//echo "e: $e\n";
 			$pitchint += $e;
-			// oscillation (let go at 55 knots, nose 5 deg up)
-			$y = 0.1*$e + 0.1*$pitchint;
+			$y = 0.05*$e + 0.001*$pitchint;
 			socket_write($sock, "set sim/flightmodel2/controls/elevator_trim $y\n");
 			break;
 	}
@@ -203,7 +239,7 @@ do {
 	if (!$subscribed) {
 		echo 'subscribing...';
 		socket_write($sock, "sub sim/cockpit2/gauges/indicators/total_energy_fpm\n");
-		socket_write($sock, "sub sim/cockpit2/gauges/indicators/turn_rate_roll_deg_pilot\n");
+		socket_write($sock, "sub sim/cockpit2/gauges/indicators/roll_AHARS_deg_pilot\n");
 		socket_write($sock, "sub sim/flightmodel2/controls/elevator_trim\n");
 		socket_write($sock, "sub sim/flightmodel2/controls/aileron_trim\n");
 		socket_write($sock, "sub sim/cockpit2/gauges/indicators/pitch_electric_deg_pilot\n");
