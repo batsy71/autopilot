@@ -29,7 +29,16 @@ echo "done\n";
 // sim/cockpit2/gauges/indicators/total_energy_fpm
 
 $turnrateint = 0;
-$airspeedint = 0;
+$pitchint = 0;
+$speedint = 0;
+$beforeturn = microtime(true);
+$beforespeed = microtime(true);
+$beforepitch = microtime(true);
+$lastturnerror = 0;
+$lastpitcherror = 0;
+$lastspeederror = 0;
+
+$pitchtoset = -11;
 
 do {
 	//echo 'reading...';
@@ -51,60 +60,93 @@ do {
 			break;	
 		
 		// control roll rate
-		case 'sim/cockpit2/gauges/indicators/turn_rate_roll_deg_pilot':
+		case 'sim/cockpit2/gauges/indicators/roll_AHARS_deg_pilot':
 			$turnrate = trim($arr[2]);
 			//echo 'turnrate: '.$turnrate."\n";
-			$r = -60; // degrees
-			$e = $r - $turnrate;
-			$turnrateint += $e;
+			$r = 30; // degrees
+			
+			$nowturn = microtime(true);
+			$dt = ($nowturn - $beforeturn);
+			
+			$turne = $r - $turnrate;
+			$turnrateint += $dt*$turne;
+			$turndiff = ($turne - $lastturnerror)/$dt;
 			//echo "turnrateint: $turnrateint\n";
-			$y = 0.1*$e + 0.1*$turnrateint;
+			
+			$kp = 0.05;
+			$ki = 0.001;
+			$kd = 0.001;
+			
+			$y = $kp * $turne + $ki * $turnrateint + $kd * $turndiff;
+			echo "y: $y, turne: $turne, turnrateint: $turnrateint, turndiff: $turndiff\n";
+			
+			$beforeturn = $nowturn;
+			$lastturnerror = $turne;
 			socket_write($sock, "set sim/flightmodel2/controls/aileron_trim $y\n");
 			break;
 		
 		// control elevator via pitch
 		case 'sim/cockpit2/gauges/indicators/pitch_electric_deg_pilot':
 			$pitch = trim($arr[2]);
-			echo "pitch: $pitch\n";
-			$r = -2.2;
-			$e = $r - $pitch;
-			//echo "e: $e\n";
-			$pitchint += $e;
-			// oscillation (let go at 55 knots, nose 5 deg up)
-			$y = 0.1*$e + 0.1*$pitchint;
+			//echo "pitch: $pitch\n";
+			//$r = -2.2;
+			$r = $pitchtoset;
 
+			$nowpitch = microtime(true);
+			$dt = ($nowpitch - $beforepitch);
+			
+			$pitche = $r - $pitch;
+			$pitchint += $dt * $pitche;
+			if ($pitchint > 30) {
+				$pitchint = 30;
+			} elseif ($pitchint < -30) {
+				$pitchint = -30;
+			}
+			$pitchdiff = ($pitche - $lastpitcherror)/$dt;
+				
+			$kp = 0.2;
+			$ki = 0.032;
+			$kd = 0.005;
+			
+			$y = $kp * $pitche + $ki * $pitchint + $kd * $pitchdiff;
+			//echo "elevator_trim: $y, pitch: $pitch, pitche: $pitche, pitchint: $pitchint, pitchdiff: $pitchdiff\n";
+
+			$beforepitch = $nowpitch;
+			$lastpitcherror = $pitche;
+			
 			socket_write($sock, "set sim/flightmodel2/controls/elevator_trim $y\n");
 			break;
 		
 		// control elevator via velocity (not possible?)
 		case 'sim/flightmodel/position/indicated_airspeed':
-			$now = microtime(true);
+			$nowspeed = microtime(true);
+			$dt = ($nowspeed - $beforespeed);
 			
 			$airspeed = trim($arr[2]);
 			//echo 'airspeed: '.$airspeed."\n";
 			$r = 60; // knots
-			$e = $r - $airspeed;
-			
-			// integrate and differentiate
-			if (isset($before)) {
-				$dt = ($now - $before);
-				$airspeedint += $dt * $e;
-				$airspeeddiff = ($lasterror - $e)/$dt;
-				$lasterror = $e;
-				//echo "airspeedint: $airspeedint\n";
-				//echo "airspeeddiff: $airspeeddiff\n";
-				//echo "dt: $dt\n";
-				$before = $now;
-			} else {
-				$airspeedint = 0;
-				$airspeeddiff = 0;
-				$airspeedint = 0;
-				$before = $now;
+			$speede = $r - $airspeed;
+			$speedint += $dt * $speede;
+			if ($speedint > 50) {
+				$speedint = 50;
+			} elseif ($speedint < -50) {
+				$speedint = -50;
 			}
+			$speeddiff = ($speede - $lastspeederror)/$dt;
+			//echo "speede: $speede, speedint: $speedint, speeddiff: $speeddiff\n";
+
+			$kp = -1;
+			$ki = -1;
+			$kd = -0.1;
 			
+			$pitchtoset = $kp * $speede + $ki * $speedint + $kd * $speeddiff;
+			//echo "updated pitchtoset to $pitchtoset\n";
+			
+			$beforespeed = $nowspeed;
+			$lastspeederror = $speede;
 			//echo "airspeedint: $airspeedint\n";
-			$ku = 0.025;
-			$tu = 16; // seconds
+			//$ku = 0.025;
+			//$tu = 16; // seconds
 			// oscillation (let go at 55 knots, nose 5 deg up)
 			// $y = -$ku*$e;
 			
@@ -145,8 +187,8 @@ do {
 	if (!$subscribed) {
 		echo 'subscribing...';
 		socket_write($sock, "sub sim/cockpit2/gauges/indicators/total_energy_fpm\n");
-		// socket_write($sock, "sub sim/flightmodel/position/indicated_airspeed 0.01\n");
-		socket_write($sock, "sub sim/cockpit2/gauges/indicators/turn_rate_roll_deg_pilot\n");
+		socket_write($sock, "sub sim/flightmodel/position/indicated_airspeed\n");
+		socket_write($sock, "sub sim/cockpit2/gauges/indicators/roll_AHARS_deg_pilot\n");
 		socket_write($sock, "sub sim/flightmodel2/controls/elevator_trim\n");
 		socket_write($sock, "sub sim/flightmodel2/controls/aileron_trim\n");
 		socket_write($sock, "sub sim/cockpit2/gauges/indicators/pitch_electric_deg_pilot\n");
