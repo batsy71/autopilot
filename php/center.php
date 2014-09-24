@@ -73,8 +73,8 @@ echo "set\n";
 
 // configuration
 $leftturn = true;	// circle into which direction?
-$triggerdeg = 7;	// how many degrees to trigger on heading?
-$bankangle = 45;	// normal bank angle while circling
+$triggerdeg = 10;	// how many degrees to trigger on heading?
+$bankangle = 30;	// normal bank angle while circling
 $normspeed = 60;	// speed in knots	
 
 // decides how strong the correction has to be (if any) and
@@ -116,6 +116,10 @@ $lastturnerror = 0;
 $lastpitcherror = 0;
 $lastspeederror = 0;
 
+$heading = 0;
+$airspeed = 0;
+$pitch = 0;
+
 $pitchtoset = -2;
 
 $rolldeg = getBankAngle($leftturn, $bankangle);
@@ -123,6 +127,7 @@ $rolldeg = getBankAngle($leftturn, $bankangle);
 do {
 	$read=socket_read($sock,1024,PHP_NORMAL_READ);
 	$arr=explode(' ',$read);
+	
 	switch ($arr[1]) {
 		case 'sim/cockpit2/gauges/indicators/total_energy_fpm':
 			$fpm = trim($arr[2]);
@@ -131,7 +136,6 @@ do {
 			break;
 		case 'sim/cockpit2/gauges/indicators/heading_electric_deg_mag_pilot':
 			$heading = trim($arr[2]);
-			//echo 'heading: '.$heading."\n";
 			if (!isset($firstheading)) {
 				$firstheading = $heading;
 				$gone = false;
@@ -144,7 +148,7 @@ do {
 					if (!$gone) $gone = true;
 				}
 				if ($gone && abs($heading - $firstheading)+$triggerdeg/2 < $triggerdeg) {
-					echo "############\ncircle completed:\n";
+					echo "\n############\ncircle completed:\n";
 					// sum up lift as function of heading as vectors
 					$fpmsum=0; $posfpmsum=0; $xsum=0; $ysum=0;
 					foreach ($lift as $heading => $fpm) {
@@ -201,6 +205,7 @@ do {
 					$correctionstarted = false;
 				}
 			}
+$needscorrection = false;
 			if ($needscorrection && !$correctionstarted && abs($heading - $startcorrectionat)+$triggerdeg/2 < $triggerdeg) {
 				// start correction
 				$rolldeg = getBankAngle($leftturn, $correctbank);
@@ -311,6 +316,8 @@ do {
 		echo "subscribed.\n";
 		$subscribed = true;
 	}
+	
+	echo "\rheading: ".round($heading).", speed: ".round($airspeed).", pitch: ".round($pitch,1);
 } while (true);
 
 socket_close($sock);
