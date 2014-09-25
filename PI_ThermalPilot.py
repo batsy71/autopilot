@@ -1,4 +1,4 @@
-import time, math
+import time, math, operator
 
 from XPLMDefs import *
 from EasyDref import EasyDref
@@ -54,6 +54,7 @@ class PythonInterface:
 		self.LastSpeedError = 0
 		
 		""" Other neat variables """
+		self.Lift = {}
 		self.MaxLat = XPLMGetDataf(self.PlaneLat)
 		self.MinLat = XPLMGetDataf(self.PlaneLat)
 		self.MaxLon = XPLMGetDataf(self.PlaneLon)
@@ -91,27 +92,10 @@ class PythonInterface:
 		elif (angle < 0): return self.DoPeriodic(angle+360)
 		else: return angle
 	
-	def CircleCompleted(self, hdgNow):
-		if (self.LeftTurn):
-			if (self.FirstHdg - hdgNow > self.TriggerDeg):
-				self.FirstGone = True
-			elif (self.FirstGone and self.DoPeriodic(hdgNow - self.FirstHdg) < self.TriggerDeg):
-				self.FirstGone = False
-				return True
-		elif (not self.LeftTurn):
-			if (hdgNow - self.FirstHdg > self.TriggerDeg):
-				self.FirstGone = True
-			elif (self.FirstGone and self.DoPeriodic(self.FirstHdg - hdgNow) < self.TriggerDeg):
-				self.FirstGone = False
-				return True
-		
-		return False
-	
 	def CircleCompleteCallback(self):
 		print "Circle completed!"
 		
 		# calculate circle radius using Equirectangular approximation as seen on http://www.movable-type.co.uk/scripts/latlong.html
-
 		dLat = (self.MaxLat - self.MinLat)/360*2*math.pi # phi
 		dLon = (self.MaxLon - self.MinLon)/360*2*math.pi # lambda
 		
@@ -123,11 +107,49 @@ class PythonInterface:
 		# for ask21 (stock airplane model)
 		# turn radius ~= 160 / tan(bank angle)
 		
+		# find average lift and better lift
+		fpmSum = 0
+		fpmPosSum = 0
+		xsum = 0
+		ysum = 0
+		for key, value in self.Lift.iteritems():
+			fpmSum += value
+			if (value > 0):
+				fpmPosSum += value
+				xsum += value * math.cos(hdgNow/360*2*math.pi)
+				ysum += value * math.sin(hdgNow/360*2*math.pi)
+		
+		minLiftHdg = min(self.Lift.iteritems(), key=operator.itemgetter(1))[0]
+		minLift = self.Lift[minLiftHdg]
+		
+		maxLiftHdg = max(self.Lift.iteritems(), key=operator.itemgetter(1))[0]
+		maxLift = self.Lift[maxLiftHdg]
+		
+		print "average lift: {:.0f}".format(round(fpmSum/len(self.Lift)/50)*50) + " fpm"
+		print "best lift: {:.0f}".format(round(maxLift/50)*50) + " fpm at {:.0f}".format(maxLiftHdg) + " deg"
+		print "worst lift: {:.0f}".format(round(minLift/50)*50) + " fpm at {:.0f}".format(minLiftHdg) + " deg"
+		
+		if (fpmSum > 0):
+			angle = math.atan(ysum/xsum)
+			# check into which quadrant the vector points
+			if   (ysum > 0 and xsum < 0): angle += math.pi
+			elif (ysum < 0 and xsum < 0): angle += math.pi
+			elif (ysum < 0 and xsum > 0): angle += 2*math.pi
+			# convert to degrees
+			angle = self.DoPeriodic(angle/(2*math.pi)*360)
+			length = math.sqrt(xsum*xsum + ysum*ysum)/fpmPosSum
+			print "better lift: {:.0f}".format(angle) + " deg, length {:.2f}".format(length)
+		else:
+			print "can't guess better lift since no updraft."
+			
 		# reset maximal values
 		self.MaxLat = XPLMGetDataf(self.PlaneLat)
 		self.MinLat = XPLMGetDataf(self.PlaneLat)
 		self.MaxLon = XPLMGetDataf(self.PlaneLon)
 		self.MinLon = XPLMGetDataf(self.PlaneLon)
+		
+		# reset lift
+		self.Lift = {}
 		
 		return
 	
@@ -145,19 +167,18 @@ class PythonInterface:
 		lonNow = XPLMGetDataf(self.PlaneLon)
 		hdgNow = XPLMGetDataf(self.PlaneHdg)
 		rollNow = XPLMGetDataf(self.PlaneRol)
-		speedNow =  XPLMGetDataf(self.PlaneSpeed)
+		speedNow = XPLMGetDataf(self.PlaneSpeed)
 		pitchNow = XPLMGetDataf(self.PlanePitch)
+		fpmNow = XPLMGetDataf(self.PlaneFpm)
+		
+		# record lift
+		self.Lift[hdgNow] = fpmNow
 		
 		# find maximal lat and lon to calculate circle radius
 		if (latNow > self.MaxLat) : self.MaxLat = latNow
 		if (latNow < self.MinLat) : self.MinLat = latNow
 		if (lonNow > self.MaxLon) : self.MaxLon = lonNow
 		if (lonNow < self.MinLon) : self.MinLon = lonNow
-		
-		#print "MaxLat: {:.6f}".format(self.MaxLat)
-		#print "MinLat: {:.6f}".format(self.MinLat)
-		#print "MaxLon: {:.6f}".format(self.MaxLon)
-		#print "MinLon: {:.6f}".format(self.MinLon)
 		
 		# control bank angle (roll -> aileron trim)
 		rollError = self.RollSet - rollNow
@@ -234,8 +255,18 @@ class PythonInterface:
 		self.PlaneElevTrim.value = newPitchTrim
 		
 		# check for circle completed callback
-		if (self.CircleCompleted(hdgNow)):
-			self.CircleCompleteCallback()
+		if (self.LeftTurn):
+			if (self.FirstHdg - hdgNow > self.TriggerDeg):
+				self.FirstGone = True
+			elif (self.FirstGone and self.DoPeriodic(hdgNow - self.FirstHdg) < self.TriggerDeg):
+				self.FirstGone = False
+				self.CircleCompleteCallback()
+		elif (not self.LeftTurn):
+			if (hdgNow - self.FirstHdg > self.TriggerDeg):
+				self.FirstGone = True
+			elif (self.FirstGone and self.DoPeriodic(self.FirstHdg - hdgNow) < self.TriggerDeg):
+				self.FirstGone = False
+				self.CircleCompleteCallback()
 		
 		self.LastTimeInLoop = time.time()
 		# set the next callback time in +n for # of seconds and -n for # of Frames
