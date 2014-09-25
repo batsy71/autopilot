@@ -15,9 +15,9 @@ class PythonInterface:
 		self.Desc = "An autopilot flying in thermals."
 		
 		""" Configuration """
-		self.LeftTurn = True	# circle into which direction
+		self.LeftTurn = False	# circle into which direction
 		self.TriggerDeg = 1		# how many degrees to trigger on heading
-		self.BankAngle = 20		# normal bank angle while circling
+		self.BankAngle = 45		# normal bank angle while circling
 		self.NormSpeed = 60		# speed in knots
 		
 		""" Data IO """
@@ -37,7 +37,11 @@ class PythonInterface:
 		self.FirstHdg = XPLMGetDataf(self.PlaneHdg)
 		self.FirstGone = False
 		
-		self.RollSet = self.BankAngle
+		if (self.LeftTurn):
+			self.RollSet = -self.BankAngle
+		else:
+			self.RollSet = self.BankAngle
+		
 		self.RollInt = 0
 		self.LastRollError = 0
 		
@@ -82,6 +86,26 @@ class PythonInterface:
 	def XPluginReceiveMessage(self, inFromWho, inMessage, inParam):
 		pass
 		
+	def DoPeriodic(self,angle):
+		if (angle > 360): return self.DoPeriodic(angle-360)
+		elif (angle < 0): return self.DoPeriodic(angle+360)
+		else: return angle
+	
+	def CircleCompleted(self, hdgNow):
+		if (self.LeftTurn):
+			if (self.FirstHdg - hdgNow > self.TriggerDeg):
+				self.FirstGone = True
+			elif (self.FirstGone and self.DoPeriodic(hdgNow - self.FirstHdg) < self.TriggerDeg):
+				self.FirstGone = False
+				return True
+		elif (not self.LeftTurn):
+			if (hdgNow - self.FirstHdg > self.TriggerDeg):
+				self.FirstGone = True
+			elif (self.FirstGone and self.DoPeriodic(self.FirstHdg - hdgNow) < self.TriggerDeg):
+				self.FirstGone = False
+				return True
+		
+		return False
 	
 	def CircleCompleteCallback(self):
 		print "Circle completed!"
@@ -210,12 +234,8 @@ class PythonInterface:
 		self.PlaneElevTrim.value = newPitchTrim
 		
 		# check for circle completed callback
-		if (abs(hdgNow - self.FirstHdg) < self.TriggerDeg):
-			if (not self.FirstGone):
-				self.FirstGone = True
-			else:
-				self.CircleCompleteCallback()
-				self.FirstGone = False
+		if (self.CircleCompleted(hdgNow)):
+			self.CircleCompleteCallback()
 		
 		self.LastTimeInLoop = time.time()
 		# set the next callback time in +n for # of seconds and -n for # of Frames
