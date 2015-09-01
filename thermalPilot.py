@@ -4,25 +4,46 @@ import xpc
 
 class thermalPilot:
 	def __init__(self):
-		self.dt = 0.1
 
+		""" Configuration """
+		self.dt = 0.05				# control timestep
+		self.LeftTurn = False	# circle into which direction
+		self.TriggerDeg = 1		# how many degrees to trigger on heading
+		self.BankAngle = 30		# normal bank angle while circling
+		self.NormSpeed = 60		# speed in knots
+
+		""" IO with XPlane and other used variables """
 		self.SpeedDREF = "sim/flightmodel/position/indicated_airspeed"
-		self.SpeedSet = 80 
+		self.SpeedSet = self.NormSpeed
 		self.SpeedInt = 0
 		self.SpeedLastError = 0
 
 		self.PitchDREF = "sim/flightmodel/position/theta"
-		self.PitchSet = 0.1
+		self.PitchSet = -2.2
 		self.PitchInt = 0
 		self.PitchLastError = 0
 		self.ElevatorTrimDREF = "sim/flightmodel2/controls/elevator_trim"
 
 		self.BankDREF = "sim/flightmodel/position/phi"
-		self.BankSet = 45
+		if (self.LeftTurn):
+			self.BankSet = -self.BankAngle
+		else:
+			self.BankSet = self.BankAngle
 		self.BankInt = 0
 		self.BankLastError = 0
 		self.AileronTrimDREF = "sim/flightmodel2/controls/aileron_trim"
 
+		self.LatDREF = "sim/flightmodel/position/latitude"
+		self.LonDREF = "sim/flightmodel/position/longitude"
+		self.HeightDREF = "sim/flightmodel/position/elevation"
+		self.HDGDREF = "sim/flightmodel/position/psi"
+		self.FPMDREF = "sim/cockpit2/gauges/indicators/total_energy_fpm"
+
+		""" Connect and begin """
+		self.connect()
+
+		
+		
 	def connect(self):
 		self.client = xpc.XPlaneConnect(xpHost = '192.168.56.1')
 		# Verify connection
@@ -36,16 +57,14 @@ class thermalPilot:
 				return
 
 	def getFlightData(self):
-		""" get Position """
-		posi = self.client.getPOSI()
-		# print "Loc: LAT %4f, LON %4f, Height %4f m" % (posi[0], posi[1], posi[2])
-		self.posi = posi
-
-		""" get Orientation and Speed """
+		self.Lat = self.client.getDREF(self.LatDREF)[0]
+		self.Lon = self.client.getDREF(self.LonDREF)[0]
+		self.HDG = self.client.getDREF(self.HDGDREF)[0]
 		self.Bank = self.client.getDREF(self.BankDREF)[0]
 		self.Pitch = self.client.getDREF(self.PitchDREF)[0]
 		self.Speed = self.client.getDREF(self.SpeedDREF)[0]
-		print "Bank: %.1f, Pitch: %.1f, Airspeed: %.0f" % (self.Bank, self.Pitch, self.Speed)
+		self.FPM = self.client.getDREF(self.FPMDREF)[0]
+		print "Bank: %.1f, Pitch: %.1f, Airspeed: %.0f, HDG: %.0f, FPM: %.0f" % (self.Bank, self.Pitch, self.Speed, self.HDG, self.FPM)
 		return
 
 	def feedbackloop(self):
